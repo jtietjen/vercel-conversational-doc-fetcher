@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PATH=\"/c/data/nvm/v24.14.0:$PATH\" /c/data/nvm/v24.14.0/npm.cmd run type-check)"
+    ]
+  }
+}
