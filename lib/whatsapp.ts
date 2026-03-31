@@ -1,124 +1,118 @@
 import crypto from 'crypto';
 
-const GRAPH_API = 'https://graph.facebook.com/v20.0';
+const BASE = 'https://api.twilio.com/2010-04-01';
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024; // 20 MB
 
-function token(): string {
-  const t = process.env.WHATSAPP_TOKEN;
-  if (!t) throw new Error('WHATSAPP_TOKEN is not set');
-  return t;
+function accountSid(): string {
+  const v = process.env.TWILIO_ACCOUNT_SID;
+  if (!v) throw new Error('TWILIO_ACCOUNT_SID is not set');
+  return v;
 }
 
-function phoneId(): string {
-  const id = process.env.WHATSAPP_PHONE_ID;
-  if (!id) throw new Error('WHATSAPP_PHONE_ID is not set');
-  return id;
+function authToken(): string {
+  const v = process.env.TWILIO_AUTH_TOKEN;
+  if (!v) throw new Error('TWILIO_AUTH_TOKEN is not set');
+  return v;
 }
 
-function appSecret(): string {
-  const s = process.env.WHATSAPP_APP_SECRET;
-  if (!s) throw new Error('WHATSAPP_APP_SECRET is not set');
-  return s;
+function fromNumber(): string {
+  const v = process.env.TWILIO_WHATSAPP_FROM;
+  if (!v) throw new Error('TWILIO_WHATSAPP_FROM is not set');
+  return v; // e.g. 'whatsapp:+14155238886'
+}
+
+function basicAuth(): string {
+  return (
+    'Basic ' +
+    Buffer.from(`${accountSid()}:${authToken()}`).toString('base64')
+  );
+}
+
+/** Format any phone string to Twilio's 'whatsapp:+49...' format */
+function toWhatsApp(phone: string): string {
+  const digits = phone.replace(/^whatsapp:\+?/, '').replace(/^\+/, '');
+  return `whatsapp:+${digits}`;
 }
 
 /**
- * Send a plain-text WhatsApp message to a recipient.
- * @param to  Phone number WITHOUT leading '+', e.g. '4917612345678'
- * @param body Message text (max ~4096 chars for WhatsApp)
+ * Send a plain-text WhatsApp message via Twilio.
+ * @param to  Phone digits without '+', e.g. '491727071518'
  */
 export async function sendTextMessage(to: string, body: string): Promise<void> {
-  const url = `${GRAPH_API}/${phoneId()}/messages`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token()}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body, preview_url: false },
-    }),
+  const params = new URLSearchParams({
+    To: toWhatsApp(to),
+    From: fromNumber(),
+    Body: body,
   });
+
+  const res = await fetch(
+    `${BASE}/Accounts/${accountSid()}/Messages.json`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: basicAuth(),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    },
+  );
 
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(
-      `WhatsApp sendTextMessage failed (${res.status}): ${detail}`,
-    );
+    throw new Error(`Twilio sendTextMessage failed (${res.status}): ${detail}`);
   }
 }
 
 /**
- * Download a media file by its WhatsApp media ID.
- * Returns the binary buffer and MIME type.
+ * Download a media file from a Twilio media URL.
+ * The URL comes directly from the webhook payload (MediaUrl0, etc.).
  */
 export async function downloadMedia(
-  mediaId: string,
+  mediaUrl: string,
 ): Promise<{ buffer: Buffer; mimeType: string }> {
-  // Step 1: get media metadata (URL + size)
-  const metaRes = await fetch(`${GRAPH_API}/${mediaId}`, {
-    headers: { Authorization: `Bearer ${token()}` },
+  const res = await fetch(mediaUrl, {
+    headers: { Authorization: basicAuth() },
   });
-  if (!metaRes.ok) {
-    const detail = await metaRes.text();
+
+  if (!res.ok) {
+    throw new Error(`Twilio media download failed (${res.status}): ${mediaUrl}`);
+  }
+
+  const contentLength = res.headers.get('content-length');
+  if (contentLength && parseInt(contentLength) > MAX_MEDIA_BYTES) {
     throw new Error(
-      `WhatsApp media metadata failed (${metaRes.status}): ${detail}`,
+      `Media too large: ${contentLength} bytes (max ${MAX_MEDIA_BYTES})`,
     );
   }
 
-  const meta = (await metaRes.json()) as {
-    url: string;
-    mime_type: string;
-    file_size?: number;
-  };
-
-  if (meta.file_size && meta.file_size > MAX_MEDIA_BYTES) {
-    throw new Error(
-      `Media file too large: ${meta.file_size} bytes (max ${MAX_MEDIA_BYTES})`,
-    );
-  }
-
-  // Step 2: download the binary — must include Authorization header
-  const fileRes = await fetch(meta.url, {
-    headers: { Authorization: `Bearer ${token()}` },
-  });
-  if (!fileRes.ok) {
-    const detail = await fileRes.text();
-    throw new Error(
-      `WhatsApp media download failed (${fileRes.status}): ${detail}`,
-    );
-  }
-
-  const arrayBuffer = await fileRes.arrayBuffer();
-  return {
-    buffer: Buffer.from(arrayBuffer),
-    mimeType: meta.mime_type,
-  };
+  const mimeType =
+    res.headers.get('content-type')?.split(';')[0] ?? 'application/octet-stream';
+  const arrayBuffer = await res.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), mimeType };
 }
 
 /**
- * Verify the X-Hub-Signature-256 HMAC header from Meta's webhook.
- * @param rawBody   Raw request body as a string (before JSON parsing)
- * @param signature Full header value, e.g. 'sha256=abc123...'
+ * Verify Twilio's X-Twilio-Signature header.
+ * @param url    Full webhook URL, e.g. 'https://yourapp.vercel.app/api/webhook'
+ * @param params Parsed form body as key-value object
+ * @param sig    Value of X-Twilio-Signature header
  */
 export function verifyWebhookSignature(
-  rawBody: string,
-  signature: string,
+  url: string,
+  params: Record<string, string>,
+  sig: string,
 ): boolean {
-  const expectedHex = crypto
-    .createHmac('sha256', appSecret())
-    .update(rawBody)
-    .digest('hex');
+  // Twilio: HMAC-SHA1 of URL + alphabetically sorted param key-value pairs
+  const sorted = Object.keys(params)
+    .sort()
+    .map((k) => `${k}${params[k]}`)
+    .join('');
 
-  const actual = signature.replace(/^sha256=/, '');
+  const expected = crypto
+    .createHmac('sha1', authToken())
+    .update(url + sorted)
+    .digest('base64');
 
-  // Both buffers must be the same length for timingSafeEqual
-  if (actual.length !== expectedHex.length) return false;
-
-  return crypto.timingSafeEqual(
-    Buffer.from(actual, 'hex'),
-    Buffer.from(expectedHex, 'hex'),
-  );
+  if (expected.length !== sig.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig));
 }

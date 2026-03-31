@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import type {
-  WhatsAppWebhookPayload,
-  WhatsAppMessage,
-  ConversationMessage,
-} from '@/types';
+import type { WhatsAppMessage, ConversationMessage } from '@/types';
 import {
   getConversation,
   appendMessage,
@@ -25,108 +21,107 @@ import {
 } from '@/lib/gemini';
 import { uploadDocument } from '@/lib/storage';
 
-// ---- GET: WhatsApp webhook verification ----
+// ---- GET: health check ----
 
-export async function GET(req: NextRequest): Promise<NextResponse> {
-  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
-  if (!verifyToken) {
-    console.error('WHATSAPP_VERIFY_TOKEN is not set');
-    return new NextResponse('Server configuration error', { status: 500 });
-  }
-
-  const { searchParams } = new URL(req.url);
-  const mode = searchParams.get('hub.mode');
-  const token = searchParams.get('hub.verify_token');
-  const challenge = searchParams.get('hub.challenge');
-
-  if (mode === 'subscribe' && token === verifyToken && challenge) {
-    // Return challenge as plain text — Meta rejects JSON
-    return new NextResponse(challenge, {
-      status: 200,
-      headers: { 'Content-Type': 'text/plain' },
-    });
-  }
-
-  return new NextResponse('Forbidden', { status: 403 });
+export async function GET(): Promise<NextResponse> {
+  return NextResponse.json({ ok: true });
 }
 
-// ---- POST: Incoming WhatsApp messages ----
+// ---- POST: Incoming Twilio WhatsApp messages ----
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // Read raw body once — needed for both HMAC verification and JSON parsing
+  // Twilio sends application/x-www-form-urlencoded
   const rawBody = await req.text();
+  const params = Object.fromEntries(new URLSearchParams(rawBody)) as Record<string, string>;
 
-  // Verify webhook signature
-  const signature = req.headers.get('x-hub-signature-256') ?? '';
-  if (!signature || !verifyWebhookSignature(rawBody, signature)) {
-    return new NextResponse('Forbidden', { status: 403 });
-  }
-
-  let payload: WhatsAppWebhookPayload;
-  try {
-    payload = JSON.parse(rawBody) as WhatsAppWebhookPayload;
-  } catch {
-    // Always return 200 to Meta — malformed body is not worth retrying
-    console.error('Failed to parse webhook JSON');
-    return new NextResponse('OK', { status: 200 });
-  }
-
-  const messages =
-    payload.entry?.[0]?.changes?.[0]?.value?.messages ?? [];
-
-  if (messages.length === 0) {
-    // Status update (delivered, read, etc.) — nothing to process
-    return new NextResponse('OK', { status: 200 });
-  }
-
-  // Process each message independently; never let one failure block others
-  for (const message of messages) {
-    try {
-      await processMessage(message.from, message.type, message);
-    } catch (err) {
-      console.error(`Error processing message from ${message.from}:`, err);
+  // Verify Twilio signature when WEBHOOK_URL is configured
+  const webhookUrl = process.env.WEBHOOK_URL;
+  if (webhookUrl) {
+    const sig = req.headers.get('x-twilio-signature') ?? '';
+    if (!sig || !verifyWebhookSignature(webhookUrl, params, sig)) {
+      return new NextResponse('Forbidden', { status: 403 });
     }
   }
 
-  // ALWAYS return 200 — non-2xx causes Meta to retry for up to 7 days
-  return new NextResponse('OK', { status: 200 });
+  // Extract fields from Twilio payload
+  const from = params['From'] ?? '';       // 'whatsapp:+491727071518'
+  const body = params['Body'] ?? '';
+  const numMedia = parseInt(params['NumMedia'] ?? '0', 10);
+
+  // Normalise phone: 'whatsapp:+491727071518' → '491727071518'
+  const phone = from.replace(/^whatsapp:\+?/, '');
+
+  if (!phone) {
+    return new NextResponse('OK', { status: 200 });
+  }
+
+  // Determine message type and build a compatible message object
+  let msgType: WhatsAppMessage['type'];
+  let message: WhatsAppMessage;
+
+  if (numMedia > 0) {
+    const mediaUrl = params['MediaUrl0'] ?? '';
+    const mimeType = params['MediaContentType0'] ?? '';
+    const isImage = mimeType.startsWith('image/');
+
+    msgType = isImage ? 'image' : 'document';
+    message = {
+      from: phone,
+      id: params['MessageSid'] ?? '',
+      timestamp: String(Date.now()),
+      type: msgType,
+      ...(isImage
+        ? { image: { id: mediaUrl, mime_type: mimeType, sha256: '' } }
+        : { document: { id: mediaUrl, mime_type: mimeType, sha256: '', filename: params['MediaFilename'] } }),
+    };
+  } else {
+    msgType = 'text';
+    message = {
+      from: phone,
+      id: params['MessageSid'] ?? '',
+      timestamp: String(Date.now()),
+      type: 'text',
+      text: { body },
+    };
+  }
+
+  try {
+    await processMessage(phone, msgType, message, params);
+  } catch (err) {
+    console.error(`Error processing message from ${phone}:`, err);
+  }
+
+  // Twilio expects a 200 response (empty or TwiML)
+  return new NextResponse('', { status: 200 });
 }
 
 // ---- Message processing ----
 
 async function processMessage(
-  from: string, // WhatsApp phone without '+'
+  from: string,
   type: string,
   message: WhatsAppMessage,
+  params: Record<string, string>,
 ): Promise<void> {
   const state = await getConversation(from);
 
-  if (!state) {
-    // No active conversation for this number — ignore
-    return;
-  }
-
-  if (state.status !== 'PENDING_DOCUMENT') {
-    // Conversation already resolved (COMPLETED or FAILED) — ignore
-    return;
-  }
+  if (!state) return;
+  if (state.status !== 'PENDING_DOCUMENT') return;
 
   const { orderId, customerName, language } = state;
   const now = new Date().toISOString();
 
-  // ---- Branch on message type ----
-
   if (type === 'image' || type === 'document') {
-    const mediaId = message.image?.id ?? message.document?.id;
-    const mimeType = message.image?.mime_type ?? message.document?.mime_type;
+    // For Twilio, the media ID field holds the direct URL
+    const mediaUrl = message.image?.id ?? message.document?.id ?? '';
+    const mimeType = message.image?.mime_type ?? message.document?.mime_type ?? '';
     const filename = message.document?.filename;
 
-    if (!mediaId || !mimeType) {
-      console.error('Missing mediaId or mimeType in message', message);
+    if (!mediaUrl || !mimeType) {
+      console.error('Missing mediaUrl or mimeType', params);
       return;
     }
 
-    // Log the customer's document submission
     const customerMsg: ConversationMessage = {
       role: 'customer',
       content: '[document received]',
@@ -135,11 +130,10 @@ async function processMessage(
     };
     const stateAfterCustomerMsg = await appendMessage(from, state, customerMsg);
 
-    // Download and validate
     let buffer: Buffer;
     let resolvedMimeType: string;
     try {
-      const media = await downloadMedia(mediaId);
+      const media = await downloadMedia(mediaUrl);
       buffer = media.buffer;
       resolvedMimeType = media.mimeType || mimeType;
     } catch (err) {
@@ -151,13 +145,9 @@ async function processMessage(
       return;
     }
 
-    const validation = await validatePackingList({
-      buffer,
-      mimeType: resolvedMimeType,
-    });
+    const validation = await validatePackingList({ buffer, mimeType: resolvedMimeType });
 
     if (validation.isPackingList && validation.confidence >= 0.7) {
-      // Valid packing list — upload to Blob
       const blobUrl = await uploadDocument({
         buffer,
         mimeType: resolvedMimeType,
@@ -166,12 +156,7 @@ async function processMessage(
         filename,
       });
 
-      const successMsg = await generateSuccessMessage({
-        customerName,
-        orderId,
-        language,
-      });
-
+      const successMsg = await generateSuccessMessage({ customerName, orderId, language });
       await sendTextMessage(from, successMsg);
 
       const systemMsg: ConversationMessage = {
@@ -179,26 +164,14 @@ async function processMessage(
         content: successMsg,
         timestamp: new Date().toISOString(),
       };
-      const stateWithSysMsg = await appendMessage(
-        from,
-        stateAfterCustomerMsg,
-        systemMsg,
-      );
+      const stateWithSysMsg = await appendMessage(from, stateAfterCustomerMsg, systemMsg);
       await markCompleted(from, stateWithSysMsg, blobUrl);
     } else {
-      // Invalid document — increment attempts
-      const stateWithAttempt = await incrementAttempts(
-        from,
-        stateAfterCustomerMsg,
-      );
+      const stateWithAttempt = await incrementAttempts(from, stateAfterCustomerMsg);
       const newAttempts = stateWithAttempt.attempts;
 
       if (newAttempts >= 3) {
-        const failMsg = await generateFailureMessage({
-          customerName,
-          orderId,
-          language,
-        });
+        const failMsg = await generateFailureMessage({ customerName, orderId, language });
         await sendTextMessage(from, failMsg);
 
         const systemMsg: ConversationMessage = {
@@ -206,11 +179,7 @@ async function processMessage(
           content: failMsg,
           timestamp: new Date().toISOString(),
         };
-        const stateWithSysMsg = await appendMessage(
-          from,
-          stateWithAttempt,
-          systemMsg,
-        );
+        const stateWithSysMsg = await appendMessage(from, stateWithAttempt, systemMsg);
         await markFailed(from, stateWithSysMsg);
       } else {
         const retryMsg = await generateRetryMessage({
@@ -233,7 +202,6 @@ async function processMessage(
   } else if (type === 'text') {
     const textBody = message.text?.body ?? '';
 
-    // Log customer text (don't increment attempts — text is not a doc submission)
     const customerMsg: ConversationMessage = {
       role: 'customer',
       content: textBody,
@@ -251,7 +219,6 @@ async function processMessage(
     };
     await appendMessage(from, stateAfterCustomerMsg, systemMsg);
   } else {
-    // Unsupported message type (audio, video, sticker, etc.)
     const staticMsg =
       language === 'de'
         ? 'Bitte senden Sie ein Foto oder PDF Ihrer Packliste.'
@@ -266,5 +233,4 @@ async function processMessage(
     };
     await appendMessage(from, state, systemMsg);
   }
-
 }
