@@ -11,7 +11,7 @@ const TTL_SECONDS = 60 * 60 * 24 * 7;
 
 // Normalise phone: strip '+' to match WhatsApp's 'from' field format
 function normalise(phone: string): string {
-  return phone.replace(/^\+/, '');
+  return String(phone).replace(/^\+/, '');
 }
 
 function convKey(phone: string): string {
@@ -55,7 +55,8 @@ export async function setTrackingIndex(
 export async function getPhoneByTrackingNumber(
   trackingNumber: string,
 ): Promise<string | null> {
-  return kv.get<string>(trackKey(trackingNumber));
+  const val = await kv.get<string>(trackKey(trackingNumber));
+  return val !== null && val !== undefined ? String(val) : null;
 }
 
 export async function deleteTrackingIndex(
