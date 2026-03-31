@@ -78,11 +78,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       language,
     });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.error('Gemini generateInitialMessage failed:', err);
     await deleteConversation(normalisedPhone);
     await deleteTrackingIndex(trackingNumber!);
     return NextResponse.json(
-      { error: 'Failed to generate message. Please try again.' },
+      { error: 'Failed to generate message.', detail: msg },
       { status: 502 },
     );
   }
