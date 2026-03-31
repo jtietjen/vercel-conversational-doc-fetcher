@@ -9,7 +9,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "vitest run --reporter=verbose tests/unit",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --reporter=verbose tests/integration"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
@@ -20,6 +24,9 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/react": "^18.0.0",
-    "typescript": "^5.4.0"
+    "@vitest/coverage-v8": "^4.1.2",
+    "dotenv": "^17.3.1",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.2"
   }
 }
