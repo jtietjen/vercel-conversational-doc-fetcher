@@ -45,7 +45,7 @@ Start a conversation with a customer.
 **Request body**
 ```json
 {
-  "phone": "+491727071518",
+  "phone": "+49xxxxxxxxx",
   "orderId": "ORD-001",
   "trackingNumber": "TRK-001",
   "customerName": "Max Müller",
@@ -65,7 +65,7 @@ Start a conversation with a customer.
 ```json
 {
   "success": true,
-  "phone": "+491727071518",
+  "phone": "+49xxxxxxxxx",
   "orderId": "ORD-001",
   "trackingNumber": "TRK-001"
 }
@@ -167,6 +167,41 @@ Method: `HTTP POST`
 
 ---
 
+## Test scripts (PowerShell)
+
+Two scripts in `scripts/` let you trigger and poll the production endpoint without any CLI interaction.
+
+**One-time setup** — copy the example config and fill in your values:
+```powershell
+Copy-Item scripts\config.example.ps1 scripts\config.local.ps1
+# then edit config.local.ps1 with your phone number and name
+```
+`config.local.ps1` is excluded from git so personal data is never committed.
+
+**Trigger a conversation** (all parameters have defaults from your local config):
+```powershell
+# Fully default — uses config.local.ps1, auto-generated IDs, default language
+.\scripts\trigger.ps1
+
+# Override individual parameters as needed
+.\scripts\trigger.ps1 -Language de
+.\scripts\trigger.ps1 -OrderId ORD-123 -TrackingNumber TRK-123 -Language en
+```
+
+**Poll until completed or failed:**
+```powershell
+.\scripts\poll-status.ps1 -TrackingNumber TRK-20260401-110523
+
+# Custom poll interval (default 10s)
+.\scripts\poll-status.ps1 -TrackingNumber TRK-20260401-110523 -IntervalSeconds 5
+```
+
+`OrderId` and `TrackingNumber` are auto-generated from the current timestamp to avoid 409 conflicts.
+
+> If PowerShell blocks execution, run once: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
+
+---
+
 ## Local development
 
 ```bash
@@ -187,7 +222,7 @@ app/
     status/[trackingNumber]/  GET   — poll status + conversation log
 lib/
   whatsapp.ts     Twilio REST API (send, download, signature verify)
-  gemini.ts       Gemini 1.5 Flash (message generation + vision validation)
+  gemini.ts       Gemini 2.5 Flash (message generation + vision validation, with retry)
   storage.ts      Vercel Blob upload
   kv.ts           Upstash Redis — conversation state + tracking index
 types/
