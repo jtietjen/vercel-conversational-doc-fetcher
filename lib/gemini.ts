@@ -9,6 +9,28 @@ function getModel() {
   });
 }
 
+const RETRYABLE_CODES = [429, 503];
+const MAX_ATTEMPTS = 4;
+const BASE_DELAY_MS = 1000;
+
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const retryable = RETRYABLE_CODES.some(code => msg.includes(`[${code}`));
+      if (!retryable) throw err;
+      lastErr = err;
+      const delay = BASE_DELAY_MS * 2 ** attempt;
+      console.warn(`Gemini attempt ${attempt + 1}/${MAX_ATTEMPTS} failed (retryable), retrying in ${delay}ms:`, msg);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * Generate the initial WhatsApp message asking the customer for their packing list.
  */
@@ -26,7 +48,7 @@ export async function generateInitialMessage(params: {
     `Ask customer "${customerName}" to send a photo or PDF of their packing list for order "${orderId}". ` +
     `Use plain text only — no markdown, no asterisks, no bullet points.`;
 
-  const result = await model.generateContent(prompt);
+  const result = await withRetry(() => model.generateContent(prompt));
   return result.response.text().trim();
 }
 
@@ -51,7 +73,7 @@ export async function generateRetryMessage(params: {
     `Mention what a packing list should include (items, quantities, weights). ` +
     `Plain text only, max 300 characters.`;
 
-  const result = await model.generateContent(prompt);
+  const result = await withRetry(() => model.generateContent(prompt));
   return result.response.text().trim();
 }
 
@@ -71,7 +93,7 @@ export async function generateSuccessMessage(params: {
     `Write a short, friendly confirmation WhatsApp message in BCP-47 language "${language}". ` +
     `Tell them the document has been received and processed. Plain text only, max 200 characters.`;
 
-  const result = await model.generateContent(prompt);
+  const result = await withRetry(() => model.generateContent(prompt));
   return result.response.text().trim();
 }
 
@@ -91,7 +113,7 @@ export async function generateFailureMessage(params: {
     `Write a short, empathetic WhatsApp message in BCP-47 language "${language}" letting them know we could not process their submission and that they should contact support. ` +
     `Plain text only, max 250 characters.`;
 
-  const result = await model.generateContent(prompt);
+  const result = await withRetry(() => model.generateContent(prompt));
   return result.response.text().trim();
 }
 
@@ -110,7 +132,7 @@ export async function generateTextGuideMessage(params: {
     `Write a short WhatsApp message in BCP-47 language "${language}" asking them to send a photo or PDF of their packing list instead. ` +
     `Plain text only, max 150 characters.`;
 
-  const result = await model.generateContent(prompt);
+  const result = await withRetry(() => model.generateContent(prompt));
   return result.response.text().trim();
 }
 
@@ -131,7 +153,7 @@ export async function validatePackingList(params: {
   const model = getModel();
 
   try {
-    const result = await model.generateContent([
+    const result = await withRetry(() => model.generateContent([
       {
         inlineData: {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -140,7 +162,7 @@ export async function validatePackingList(params: {
         },
       },
       VALIDATION_PROMPT,
-    ]);
+    ]));
 
     const text = result.response.text();
 
