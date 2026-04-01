@@ -147,7 +147,7 @@ async function processMessage(
 
     const validation = await validatePackingList({ buffer, mimeType: resolvedMimeType });
 
-    if (validation.isPackingList && validation.confidence >= 0.7) {
+    if (validation.isPackingList && validation.confidence >= 0.8) {
       const blobUrl = await uploadDocument({
         buffer,
         mimeType: resolvedMimeType,

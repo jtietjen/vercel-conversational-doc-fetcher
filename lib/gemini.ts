@@ -137,8 +137,18 @@ export async function generateTextGuideMessage(params: {
 }
 
 const VALIDATION_PROMPT =
-  'Analyze this document image or PDF. Determine if it is a packing list. ' +
-  'A valid packing list should contain: an itemized list of goods, quantities, and ideally weights or dimensions. ' +
+  'Analyze this document image or PDF. Determine STRICTLY whether it is a packing list.\n\n' +
+  'A VALID packing list:\n' +
+  '- Contains an itemised list of goods with quantities\n' +
+  '- May include weights, dimensions, or package counts\n' +
+  '- Does NOT contain unit prices, monetary amounts, currency symbols, or payment terms\n\n' +
+  'REJECT as NOT a packing list if the document is or contains any of:\n' +
+  '- Commercial invoice or proforma invoice (has prices / values / totals)\n' +
+  '- Invoice of any kind\n' +
+  '- Air waybill or bill of lading\n' +
+  '- Customs declaration or import/export entry\n' +
+  '- Delivery note that includes prices\n\n' +
+  'If you see ANY monetary value, price column, total, or currency symbol (USD, EUR, CNY, $, \u20ac, \u00a5, etc.) the document is NOT a packing list.\n\n' +
   'Return ONLY valid JSON with no markdown fencing: ' +
   '{ "isPackingList": boolean, "confidence": number, "issues": string[], "extractedItems": number }';
 

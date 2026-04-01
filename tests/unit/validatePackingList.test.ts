@@ -58,26 +58,41 @@ describe('validatePackingList', () => {
     expect(result.issues[0]).toMatch(/commercial invoice/i);
   });
 
-  it('passes through confidence of exactly 0.7 (threshold boundary)', async () => {
+  it('passes through confidence of exactly 0.8 (threshold boundary)', async () => {
     mockGenerateContent.mockResolvedValueOnce(
-      makeResponse('{"isPackingList":true,"confidence":0.7,"issues":[]}'),
+      makeResponse('{"isPackingList":true,"confidence":0.8,"issues":[]}'),
     );
 
     const result = await validatePackingList({ buffer: DUMMY_BUFFER, mimeType: PDF_MIME });
 
     expect(result.isPackingList).toBe(true);
-    expect(result.confidence).toBe(0.7);
+    expect(result.confidence).toBe(0.8);
   });
 
-  it('passes through confidence of 0.69 (below threshold, enforced by caller)', async () => {
+  it('passes through confidence of 0.79 (below threshold, enforced by caller)', async () => {
     mockGenerateContent.mockResolvedValueOnce(
-      makeResponse('{"isPackingList":false,"confidence":0.69,"issues":["Low confidence"]}'),
+      makeResponse('{"isPackingList":false,"confidence":0.79,"issues":["Low confidence"]}'),
     );
 
     const result = await validatePackingList({ buffer: DUMMY_BUFFER, mimeType: PDF_MIME });
 
     expect(result.isPackingList).toBe(false);
-    expect(result.confidence).toBe(0.69);
+    expect(result.confidence).toBe(0.79);
+  });
+
+  it('returns isPackingList:false for a document with items/quantities but containing prices', async () => {
+    mockGenerateContent.mockResolvedValueOnce(
+      makeResponse(
+        '{"isPackingList":false,"confidence":0.92,"issues":["Document contains unit prices and monetary totals — this is an invoice, not a packing list"],"extractedItems":0}',
+      ),
+    );
+
+    const result = await validatePackingList({ buffer: DUMMY_BUFFER, mimeType: PDF_MIME });
+
+    expect(result.isPackingList).toBe(false);
+    expect(result.confidence).toBe(0.92);
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0]).toMatch(/price|invoice/i);
   });
 
   it('extracts JSON when Gemini wraps the response in markdown code fences', async () => {
